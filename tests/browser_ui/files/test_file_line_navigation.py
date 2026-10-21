@@ -141,6 +141,15 @@ def seeded_session(browser_contract: BrowserContract) -> BrowserSession:
         f"{api}/resources/environments/default", {"metadata": {"root": "/workspace"}}
     )
     browser_contract.json(f"{api}/resources/environments/default/changes", empty)
+    browser_contract.json(
+        f"{api}/resources/environments/default/diff-bases",
+        {
+            "available": False,
+            "default": None,
+            "branches": [],
+            "commits": [],
+        },
+    )
     browser_contract.json(f"{api}/resources/environments/default/filesystem", empty)
     browser_contract.json(f"{api}/resources/environments/default/filesystem/src", empty)
     browser_contract.json(
@@ -1033,3 +1042,194 @@ def test_large_markdown_citation_and_unsaved_resize(
             expect(dialog).to_be_visible()
             dialog.get_by_role("button", name="Keep editing", exact=True).click()
     expect(viewer.locator(".tiptap")).to_have_count(0)
+
+
+@pytest.mark.parametrize("entrypoint", ["direct", "chat", "files", "changes", "search"])
+def test_selectable_diff_baseline_for_workspace_files(
+    page: Page,
+    seeded_session: BrowserSession,
+    entrypoint: str,
+) -> None:
+    """All file entry points share the picker, exact-link state, and responsive diff."""
+    page.set_default_timeout(10_000)
+    seeded_session.features["workspace_content_search"] = True
+    base_url, session_id = seeded_session
+    environment = f"/v1/sessions/{session_id}/resources/environments/default"
+    current = 'def greet():\n    return "hello current"\n'
+    previous = 'def greet():\n    return "hello previous"\n'
+    main_commit, older_commit = "a" * 40, "b" * 40
+    _seed_citation_file(page, seeded_session)
+    contract = seeded_session.contract
+    contract.json(
+        f"{environment}/filesystem/{_FILE_PATH}",
+        {
+            "object": "session.environment.filesystem.file_content",
+            "path": _FILE_PATH,
+            "content": current,
+            "encoding": "utf-8",
+            "content_type": "text/plain",
+            "bytes": len(current),
+        },
+    )
+    contract.json(
+        f"{environment}/filesystem/src",
+        {
+            "object": "list",
+            "data": [
+                {
+                    "path": _FILE_PATH,
+                    "name": "citation_target.py",
+                    "type": "file",
+                    "bytes": len(current),
+                }
+            ],
+            "has_more": False,
+        },
+    )
+    if entrypoint != "changes":
+        contract.json(f"{environment}/changes", {"object": "list", "data": [], "has_more": False})
+    contract.json(
+        f"{environment}/filesystem",
+        {
+            "object": "list",
+            "data": [
+                {
+                    "path": _FILE_PATH,
+                    "name": "citation_target.py",
+                    "type": "file",
+                    "bytes": len(current),
+                },
+            ],
+            "has_more": False,
+        },
+    )
+    contract.json(
+        f"{environment}/search",
+        {
+            "object": "list",
+            "data": [
+                {
+                    "path": _FILE_PATH,
+                    "name": "citation_target.py",
+                    "type": "file",
+                    "bytes": len(current),
+                },
+            ],
+            "has_more": False,
+        },
+    )
+    contract.json(
+        f"{environment}/content-search",
+        {
+            "matches": [
+                {
+                    "path": _FILE_PATH,
+                    "line": 2,
+                    "column": 13,
+                    "text": current.splitlines()[1],
+                    "match_start": 12,
+                    "match_end": 19,
+                }
+            ],
+            "truncated": False,
+            "warning": None,
+        },
+    )
+    contract.json(
+        f"{environment}/diff-bases",
+        {
+            "available": True,
+            "default": {"ref": "refs/heads/main", "label": "main", "commit": main_commit},
+            "branches": [{"ref": "refs/heads/main", "label": "main", "commit": main_commit}],
+            "commits": [{"commit": older_commit, "subject": "Earlier greeting"}],
+        },
+    )
+
+    def add_comment(request):
+        comment = {
+            **request.post_data_json,
+            "id": "review-comment",
+            "conversation_id": session_id,
+            "status": "draft",
+            "created_at": 1,
+            "updated_at": 1,
+            "created_by": None,
+        }
+        seeded_session.comments.append(comment)
+        return comment
+
+    contract.json(f"/v1/sessions/{session_id}/comments", add_comment, method="POST")
+    requested_bases = []
+
+    def diff(request):
+        base = parse_qs(urlparse(request.url).query).get("base", [None])[0]
+        requested_bases.append(base)
+        commit = main_commit if base in ("refs/heads/main", main_commit) else older_commit
+        return {
+            "object": "session.environment.filesystem.file_diff",
+            "path": _FILE_PATH,
+            "before": previous,
+            "after": current,
+            "base": {"ref": base, "commit": commit},
+        }
+
+    contract.json(f"{environment}/diff/{_FILE_PATH}", diff)
+    page.set_viewport_size({"width": 1600, "height": 1000})
+    page.add_init_script(
+        "localStorage.setItem('omnigent:file-view-preferences', "
+        "JSON.stringify({diffActive: false}));"
+    )
+    page.goto(
+        f"{base_url}/c/{session_id}" + (f"?file={_FILE_PATH}" if entrypoint == "direct" else "")
+    )
+    rail = page.get_by_role("complementary", name="Workspace")
+    if entrypoint == "chat":
+        page.get_by_role("button", name="Plain file", exact=True).click()
+    elif entrypoint in ("files", "changes"):
+        page.get_by_role("button", name="Expand right panel", exact=True).click()
+        rail.get_by_role("tab", name=re.compile(f"^{entrypoint.title()}")).click()
+        rail.get_by_role("button", name=re.compile("citation_target.py")).filter(
+            has_text="citation_target.py"
+        ).first.click()
+    elif entrypoint == "search":
+        page.get_by_role("button", name="Expand right panel", exact=True).click()
+        rail.get_by_role("tab", name="Content search", exact=True).click()
+        search = rail.get_by_role("searchbox", name="Search file contents")
+        search.fill("current")
+        search.press("Enter")
+        rail.get_by_role("button", name=f"Open {_FILE_PATH} at line 2").click()
+    viewer = page.locator('[data-testid="file-viewer"]:visible')
+    viewer.get_by_role("button", name="Show diff", exact=True).click()
+    expect(viewer.locator(".monaco-diff-editor")).to_be_visible(timeout=30_000)
+    expect(viewer.get_by_role("button", name="Compare against: main")).to_be_visible()
+    expect(page).to_have_url(re.compile(f"diffBase={main_commit}"))
+    assert "refs/heads/main" in requested_bases
+
+    if entrypoint == "direct":
+        line = viewer.locator(".modified .view-line").filter(has_text="hello current").first
+        line.dblclick(position={"x": 135, "y": 8})
+        page.get_by_role("button", name="Add comment", exact=True).click()
+        textarea = viewer.get_by_placeholder("Add a comment…")
+        textarea.fill("Keep this comment draft while changing the baseline")
+    viewer.get_by_role("button", name="Compare against: main").click()
+    page.get_by_role("option", name="bbbbbbbb Earlier greeting").click()
+    expect(page).to_have_url(re.compile(f"diffBase={older_commit}"))
+    expect(viewer.locator(".monaco-diff-editor")).to_be_visible()
+    if entrypoint == "direct":
+        expect(viewer.get_by_placeholder("Add a comment…")).to_have_value(
+            "Keep this comment draft while changing the baseline"
+        )
+        viewer.get_by_role("button", name="Add Comment", exact=True).click()
+        expect(
+            viewer.get_by_text("Keep this comment draft while changing the baseline", exact=True)
+        ).to_be_visible()
+        comment = seeded_session.comments[0]
+        assert current[comment["start_index"] : comment["end_index"]] == comment["anchor_content"]
+        assert comment["path"] == _FILE_PATH
+    page.set_viewport_size({"width": 600, "height": 1000})
+    expect(viewer.get_by_role("button", name="Compare against: bbbbbbbb")).to_be_visible()
+    expect(viewer.locator(".monaco-diff-editor")).to_be_visible()
+    page.reload()
+    expect(viewer.get_by_role("button", name="Compare against: bbbbbbbb")).to_be_visible()
+    expect(viewer.locator(".monaco-diff-editor")).to_be_visible(timeout=30_000)
+    assert older_commit in requested_bases

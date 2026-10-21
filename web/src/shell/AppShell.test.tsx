@@ -3815,7 +3815,7 @@ describe("AppShell URL sync — file param", () => {
 
     // Deep-link into the workspace with every rail-pointing param. conv_abc is
     // seeded open, so the rail mounts open with the params live.
-    renderShell("/c/conv_abc?file=README.md&diff=1&comment=c1");
+    renderShell("/c/conv_abc?file=README.md&diff=1&diffBase=abcdef&comment=c1");
 
     // Sanity: the rail is open and the params survived restore.
     expect(screen.getByRole("button", { name: "Collapse right panel" })).toBeInTheDocument();
@@ -3829,6 +3829,7 @@ describe("AppShell URL sync — file param", () => {
     const afterCollapse = screen.getByTestId("url-params").textContent ?? "";
     expect(afterCollapse).not.toContain("file=");
     expect(afterCollapse).not.toContain("diff=");
+    expect(afterCollapse).not.toContain("diffBase=");
     expect(afterCollapse).not.toContain("comment=");
 
     fireEvent.click(screen.getByRole("button", { name: "Expand right panel" }));

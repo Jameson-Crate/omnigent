@@ -627,3 +627,174 @@ def test_search_from_filesystem_root_keeps_paths_intact(monkeypatch: pytest.Monk
     paths = [e["path"] for e in result["data"]]
     assert "etc" in paths, paths
     assert all((Path("/") / p).exists() for p in paths), paths
+
+
+def _comparison_git(root: Path, *arguments: str) -> str:
+    return subprocess.run(
+        ["git", *arguments],
+        cwd=root,
+        env=_git_env(),
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
+@pytest.mark.parametrize("revision", ["HEAD", "HEAD~1", "baseline", "release", "short", "full"])
+def test_explicit_diff_uses_exact_revision_and_saved_contents(
+    tmp_path: Path, revision: str
+) -> None:
+    _git_repo(tmp_path)
+    original = _comparison_git(tmp_path, "rev-parse", "HEAD")
+    _comparison_git(tmp_path, "branch", "baseline")
+    _comparison_git(tmp_path, "tag", "-a", "release", "-m", "release")
+    target = tmp_path / "committed.txt"
+    target.write_text("committed change\n")
+    _comparison_git(tmp_path, "commit", "-am", "change")
+    target.write_text("staged change\n")
+    _comparison_git(tmp_path, "add", "committed.txt")
+    target.write_text("saved working content\n")
+    base = {"short": original[:10], "full": original}.get(revision, revision)
+    result = WorkspaceReader(tmp_path).diff("conv", "committed.txt", base=base)
+    assert result["before"] == ("committed change\n" if revision == "HEAD" else "original\n")
+    assert result["after"] == "saved working content\n"
+    assert result["base"] == {
+        "ref": base,
+        "commit": _comparison_git(tmp_path, "rev-parse", f"{base}^{{commit}}"),
+    }
+
+
+@pytest.mark.parametrize("state", ["unchanged", "added", "deleted", "empty", "missing"])
+def test_explicit_diff_handles_both_file_sides(tmp_path: Path, state: str) -> None:
+    _git_repo(tmp_path)
+    path = "committed.txt"
+    if state == "added":
+        path = "new.txt"
+        (tmp_path / path).write_text("new\n")
+    elif state == "deleted":
+        (tmp_path / path).unlink()
+    elif state == "empty":
+        (tmp_path / path).write_text("")
+    elif state == "missing":
+        path = "missing.txt"
+    reader = WorkspaceReader(tmp_path)
+    if state == "missing":
+        with pytest.raises(WorkspaceReaderError) as error:
+            reader.diff("conv", path, base="HEAD")
+        assert error.value.status == 404
+        return
+    result = reader.diff("conv", path, base="HEAD")
+    assert result["before"] == (None if state == "added" else "original\n")
+    assert (
+        result["after"]
+        == {"unchanged": "original\n", "added": "new\n", "deleted": None, "empty": ""}[state]
+    )
+
+
+@pytest.mark.parametrize(
+    "reference", ["main", "origin/main", "master", "origin/master", "develop", "HEAD"]
+)
+def test_diff_bases_default_and_recent_history(tmp_path: Path, reference: str) -> None:
+    _git_repo(tmp_path)
+    _comparison_git(tmp_path, "branch", "-m", "topic")
+    if reference != "HEAD":
+        ref = (
+            f"refs/remotes/{reference}"
+            if reference.startswith("origin/")
+            else f"refs/heads/{reference}"
+        )
+        _comparison_git(tmp_path, "update-ref", ref, "HEAD")
+        if reference == "develop":
+            _comparison_git(tmp_path, "update-ref", "refs/remotes/origin/develop", "HEAD")
+            _comparison_git(
+                tmp_path, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/develop"
+            )
+            reference = "origin/develop"
+    result = WorkspaceReader(tmp_path).diff_bases()
+    assert result["available"] is True
+    assert result["default"]["label"] == reference
+    assert result["commits"][0]["subject"] == "init"
+    assert not any(branch["label"] == "origin/HEAD" for branch in result["branches"])
+
+
+def test_diff_bases_prefers_main_and_supports_empty_and_non_git_workspaces(tmp_path: Path) -> None:
+    reader = WorkspaceReader(tmp_path)
+    assert reader.diff_bases() == {
+        "available": False,
+        "default": None,
+        "branches": [],
+        "commits": [],
+    }
+    with pytest.raises(WorkspaceReaderError, match="not a Git checkout"):
+        reader.diff("conv", "file.txt", base="HEAD")
+    _comparison_git(tmp_path, "init")
+    assert WorkspaceReader(tmp_path).diff_bases() == {
+        "available": True,
+        "default": None,
+        "branches": [],
+        "commits": [],
+    }
+    _git_repo(tmp_path)
+    _comparison_git(tmp_path, "branch", "-M", "topic")
+    for branch in ("master", "main"):
+        _comparison_git(tmp_path, "branch", branch)
+    assert WorkspaceReader(tmp_path).diff_bases()["default"]["label"] == "main"
+
+
+@pytest.mark.parametrize(
+    "base", ["missing-commit", "--help", "", "HEAD:committed.txt", "bad\x00revision"]
+)
+def test_explicit_diff_rejects_invalid_revisions(tmp_path: Path, base: str) -> None:
+    _git_repo(tmp_path)
+    with pytest.raises(WorkspaceReaderError) as error:
+        WorkspaceReader(tmp_path).diff("conv", "committed.txt", base=base)
+    assert (error.value.status, error.value.code) == (400, "invalid_revision")
+
+
+def test_explicit_diff_confines_paths_and_maps_workspace_subdirectories(tmp_path: Path) -> None:
+    _git_repo(tmp_path)
+    nested = tmp_path / "sub"
+    nested.mkdir()
+    (nested / "odd [name].txt").write_text("nested\n")
+    _comparison_git(tmp_path, "add", ".")
+    _comparison_git(tmp_path, "commit", "-m", "nested")
+    reader = WorkspaceReader(nested)
+    assert reader.diff("conv", "odd [name].txt", base="HEAD")["before"] == "nested\n"
+    (nested / "escape.txt").symlink_to(tmp_path / "committed.txt")
+    for path in ("../committed.txt", "escape.txt", "/committed.txt"):
+        with pytest.raises(WorkspaceReaderError) as error:
+            reader.diff("conv", path, base="HEAD")
+        assert error.value.status == 400
+
+
+def test_explicit_diff_surfaces_git_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _git_repo(tmp_path)
+    reader = WorkspaceReader(tmp_path)
+
+    def timeout(*args, **kwargs):
+        raise subprocess.TimeoutExpired("git", 5)
+
+    monkeypatch.setattr("omnigent.workspace_fs.subprocess.run", timeout)
+    with pytest.raises(WorkspaceReaderError) as error:
+        reader.diff("conv", "committed.txt", base="HEAD")
+    assert (error.value.status, error.value.code) == (500, "git_read_failed")
+
+
+@pytest.mark.parametrize("side", ["before", "after"])
+def test_explicit_diff_rejects_oversize_content(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    side: str,
+) -> None:
+    _git_repo(tmp_path)
+    monkeypatch.setattr("omnigent.workspace_fs._MAX_READ_BYTES", 16)
+    target = tmp_path / "committed.txt"
+    target.write_text("x" * 17)
+    if side == "before":
+        _comparison_git(tmp_path, "commit", "-am", "large baseline")
+        target.write_text("small")
+    with pytest.raises(WorkspaceReaderError) as error:
+        WorkspaceReader(tmp_path).diff("conv", "committed.txt", base="HEAD")
+    assert (error.value.status, error.value.code) == (413, "file_too_large")

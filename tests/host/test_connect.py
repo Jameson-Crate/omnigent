@@ -9566,3 +9566,49 @@ async def test_host_publishes_stored_workspace_at_startup(
 
     assert host._origin_workspace_id == "1965859176160743"
     assert os.environ[debug_logging.ORIGIN_WORKSPACE_ID_ENV_VAR] == "1965859176160743"
+
+
+async def test_host_serves_git_comparison_reads(tmp_path: Path) -> None:
+    subprocess.run(["git", "init", "-b", "main"], cwd=tmp_path, check=True, capture_output=True)
+    (tmp_path / "clean.txt").write_text("saved file")
+    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "-m",
+            "initial",
+        ],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    host = _make_host_process()
+    try:
+        bases = host._handle_fs_request(
+            HostFsRequestFrame(
+                request_id="bases",
+                op="diff_bases",
+                workspace=str(tmp_path),
+                session_id="session",
+            )
+        )
+        diff = host._handle_fs_request(
+            HostFsRequestFrame(
+                request_id="diff",
+                op="diff",
+                workspace=str(tmp_path),
+                session_id="session",
+                params={"path": "clean.txt", "base": "main"},
+            )
+        )
+        assert bases.status == "ok", bases
+        assert bases.payload["default"]["label"] == "main"
+        assert diff.status == "ok", diff
+        assert diff.payload["before"] == diff.payload["after"] == "saved file"
+    finally:
+        _cleanup_host(host)

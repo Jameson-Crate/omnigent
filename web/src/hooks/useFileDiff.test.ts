@@ -68,7 +68,7 @@ afterEach(() => {
 function renderDiff(
   conversationId: string | undefined,
   path: string | null,
-  options: { requested?: boolean } = {},
+  options: { requested?: boolean; base?: string; enabled?: boolean } = {},
   retry: boolean | number = false,
 ) {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry, retryDelay: 0 } } });
@@ -281,5 +281,59 @@ describe("useFileDiff — error handling", () => {
     expect(result.current.error).toMatchObject({
       message: "git status timed out after 5.0s",
     });
+  });
+});
+
+describe("useFileDiff — explicit baselines", () => {
+  it("fetches unchanged files against an encoded revision", async () => {
+    setHooks({ serveable: true, changedPaths: [] });
+    fetchMock.mockResolvedValue(mockResponse({ before: "old", after: "new" }));
+    const { result } = renderDiff("conv_1", "src/a b.ts", { base: "feature/review~2" });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/v1/sessions/conv_1/resources/environments/default/diff/src/a%20b.ts?base=feature%2Freview%7E2",
+      expect.anything(),
+    );
+  });
+
+  it("does not fetch an explicit comparison until requested", () => {
+    setHooks({ serveable: true, changedPaths: ["a.ts"] });
+    renderDiff("conv_1", "a.ts", { base: "main", enabled: false });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("does not retry an unavailable revision", async () => {
+    setHooks({ serveable: true, changedPaths: [] });
+    fetchMock.mockResolvedValue(
+      mockResponse(
+        { error: { message: "Revision is not available locally" } },
+        { ok: false, status: 400 },
+      ),
+    );
+    const { result } = renderDiff("conv_1", "a.ts", { base: "missing" }, 3);
+    await waitFor(() => expect(result.current.isError).toBe(true));
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(result.current.error?.message).toBe("Revision is not available locally");
+  });
+
+  it("keeps responses from different baselines separate", async () => {
+    setHooks({ serveable: true, changedPaths: [] });
+    fetchMock.mockImplementation(async (url: string) =>
+      mockResponse({ before: url.includes("base=main") ? "main" : "older", after: "current" }),
+    );
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const wrapper = ({ children }: { children: ReactNode }) =>
+      createElement(QueryClientProvider, { client }, children);
+    const { result, rerender } = renderHook(({ base }) => useFileDiff("conv_1", "a.ts", { base }), {
+      wrapper,
+      initialProps: { base: "main" },
+    });
+    await waitFor(() => expect(result.current.data?.before).toBe("main"));
+    rerender({ base: "HEAD~2" });
+    expect(result.current.data).toBeUndefined();
+    await waitFor(() => expect(result.current.data?.before).toBe("older"));
+    rerender({ base: "main" });
+    expect(result.current.data?.before).toBe("main");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 });

@@ -1442,6 +1442,7 @@ function AppShellImpl() {
         const next = new URLSearchParams(prev);
         next.delete("file");
         next.delete("diff");
+        next.delete("diffBase");
         next.delete("comment");
         next.delete("line");
         next.delete("column");

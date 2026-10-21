@@ -10297,3 +10297,61 @@ async def test_environment_id_is_one_runner_url_segment(
             == (base + quote(environment_id, safe="") + suffix).encode()
         )
         assert forwarded.fragment == ""
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "suffix,operation,params",
+    [
+        (
+            "diff/src/main.ts?base=feature%2Freview~2",
+            "diff",
+            {"path": "src/main.ts", "base": "feature/review~2"},
+        ),
+        ("diff-bases", "diff_bases", {}),
+    ],
+)
+async def test_comparison_reads_fall_back_to_host(
+    offline_env_client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+    suffix: str,
+    operation: str,
+    params: dict[str, str],
+) -> None:
+    from omnigent.server.routes import _host_filesystem
+
+    captured = {}
+
+    async def read(**kwargs):
+        captured.update(kwargs)
+        return {"available": True}
+
+    monkeypatch.setattr(_host_filesystem, "read_workspace_from_host", read)
+    response = await offline_env_client.get(
+        f"/v1/sessions/{_OFFLINE_SESSION}/resources/environments/default/{suffix}"
+    )
+    assert response.status_code == 200, response.text
+    assert captured["op"] == operation
+    assert captured["params"] == params
+    assert captured["workspace"] == _OFFLINE_WORKSPACE
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "suffix,params",
+    [
+        ("diff/src/main.ts?base=feature%2Freview~2", {"base": "feature/review~2"}),
+        ("diff-bases", None),
+    ],
+)
+async def test_comparison_reads_forward_to_runner(
+    client: httpx.AsyncClient,
+    suffix: str,
+    params: dict[str, str] | None,
+) -> None:
+    runner = _FakeRunnerClient(payload={"available": True})
+    set_runner_router(_FakeRunnerRouter(runner))
+    response = await client.get(f"{_FS_BASE}/{suffix}")
+    assert response.status_code == 200, response.text
+    assert runner.get_params[-1] == params
+    assert runner.calls[-1][1].endswith(suffix.split("?")[0])

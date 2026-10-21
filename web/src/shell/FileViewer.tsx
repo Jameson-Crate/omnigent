@@ -81,6 +81,9 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/comp
 import { downloadWorkspaceFile, useFileContent } from "@/hooks/useFileContent";
 import { isVideoFile } from "@/lib/video";
 import { useFileDiff } from "@/hooks/useFileDiff";
+import { useDiffBases, type DiffBase } from "@/hooks/useDiffBases";
+import { useFileDiffBaseline } from "@/hooks/useFileDiffBaseline";
+import { DiffBaselinePicker } from "./DiffBaselinePicker";
 import {
   type Comment,
   useAddComment,
@@ -743,13 +746,33 @@ function FileViewerBody({
   // Binary/base64 files render CodeViewer's "Preview not available" notice, not
   // Monaco — mirrors CodeViewer's own base64/binary-path check.
   const isBinary = fileQuery.data?.encoding === "base64" || isBinaryPath(path);
-  // Show Δ button only when the file appears in the session's changed-files list.
+  const supportsTextDiff = !isImage && !isPdf && !isVideo && !isModel && !isBinary;
+  const diffBases = useDiffBases(conversationId, open && isActiveViewport && supportsTextDiff);
+  const initialBaseRef = useRef<{ sessionId: string | undefined; base: DiffBase | null }>({
+    sessionId: conversationId,
+    base:
+      syncUrl && searchParams.get("diffBase")
+        ? { ref: searchParams.get("diffBase")!, label: searchParams.get("diffBase")!.slice(0, 8) }
+        : null,
+  });
+  const [selectedBase, setSelectedBase] = useFileDiffBaseline(
+    conversationId,
+    initialBaseRef.current.sessionId === conversationId ? initialBaseRef.current.base : null,
+  );
+  const comparisonBase =
+    selectedBase ??
+    diffBases.data?.default ??
+    (diffBases.data?.available ? { ref: "HEAD", label: "HEAD" } : null);
+  // Git comparisons do not depend on the changed-files registry.
   const isDiffAvailable =
     !isImage &&
     !isPdf &&
     !isVideo &&
     !isModel &&
-    (changedFiles.data?.data.some((f) => f.path === path) ?? false);
+    !isBinary &&
+    (diffBases.data?.available === true ||
+      !!selectedBase ||
+      (changedFiles.data?.data.some((f) => f.path === path) ?? false));
   const isDeletedFile =
     changedFiles.data?.data.some((f) => f.path === path && f.status === "deleted") ?? false;
   const revealTarget = useRevealTarget(path);
@@ -776,7 +799,17 @@ function FileViewerBody({
     requestedDiff &&
     linkedFileRef.current?.conversationId === conversationId &&
     linkedFileRef.current?.path === path;
-  const diffQuery = useFileDiff(conversationId, isVideo ? null : path, { requested: linkedDiff });
+  const diffQuery = useFileDiff(
+    conversationId,
+    isVideo || (requestedDiff && diffBases.isPending) ? null : path,
+    comparisonBase
+      ? {
+          requested: requestedDiff,
+          base: comparisonBase.ref,
+          enabled: requestedDiff,
+        }
+      : { requested: linkedDiff },
+  );
   const prepareDiff =
     requestedDiff &&
     (isDiffAvailable || (linkedDiff && changedFiles.data === undefined && !changedFiles.isError));
@@ -1034,20 +1067,39 @@ function FileViewerBody({
     if (!syncUrl || !open || !isActiveViewport) return;
     const wantDiff = diffActive && isDiffAvailable;
     const hasDiff = searchParams.has("diff");
-    if (wantDiff === hasDiff) return; // already in sync — no navigate needed
+    const resolvedBase = wantDiff ? (diffQuery.data?.base?.commit ?? selectedBase?.ref) : undefined;
+    if (
+      wantDiff === hasDiff &&
+      (resolvedBase
+        ? searchParams.get("diffBase") === resolvedBase
+        : wantDiff || !searchParams.has("diffBase"))
+    )
+      return;
     setSearchParams(
       (prev) => {
         const next = new URLSearchParams(prev);
         if (wantDiff) {
           next.set("diff", "1");
+          if (resolvedBase) next.set("diffBase", resolvedBase);
         } else {
           next.delete("diff");
+          next.delete("diffBase");
         }
         return next;
       },
       { replace: true },
     );
-  }, [syncUrl, diffActive, isDiffAvailable, open, isActiveViewport, searchParams, setSearchParams]);
+  }, [
+    syncUrl,
+    diffActive,
+    isDiffAvailable,
+    open,
+    isActiveViewport,
+    searchParams,
+    setSearchParams,
+    diffQuery.data?.base?.commit,
+    selectedBase?.ref,
+  ]);
 
   // Toolbar actions, declared once and rendered two ways: inline icon buttons
   // when there's room, or rows in an overflow ("⋯") menu when there isn't.
@@ -1660,6 +1712,25 @@ function FileViewerBody({
         </div>
       </div>
 
+      {viewMode === "diff" && diffBases.data?.available && comparisonBase && (
+        <DiffBaselinePicker
+          value={comparisonBase}
+          choices={diffBases.data}
+          onSelect={(base) => {
+            if (!pendingBodyRef.current) setActiveSelection(null);
+            setSelectedBase(base);
+          }}
+        />
+      )}
+      {supportsTextDiff && diffBases.isError && (
+        <div className="flex items-center gap-2 border-b border-border px-4 py-2 text-ui text-destructive">
+          Could not load comparison baselines: {diffBases.error.message}
+          <Button variant="ghost" size="sm" onClick={() => void diffBases.refetch()}>
+            Retry
+          </Button>
+        </div>
+      )}
+
       <div className="min-h-0 flex-1 flex flex-col md:flex-row overflow-hidden">
         <div
           ref={contentAreaRef}
@@ -1688,6 +1759,9 @@ function FileViewerBody({
                 {diffQuery.error instanceof Error
                   ? diffQuery.error.message
                   : String(diffQuery.error)}
+                <Button variant="ghost" size="sm" onClick={() => void diffQuery.refetch()}>
+                  Retry
+                </Button>
               </div>
             ) : // Wait for the diff payload before mounting Monaco. useFileDiff uses
             // null to mean new (before=null) / deleted (after=null) file, so
@@ -1708,11 +1782,14 @@ function FileViewerBody({
                     </div>
                   }
                 >
-                  {/* key={path} remounts per file so onMount re-runs (EOL + comment
-                  wiring re-applied) and `ready` resets while the new grammar loads. */}
+                  {diffQuery.data.before === diffQuery.data.after && (
+                    <div className="px-4 py-2 text-ui text-muted-foreground">
+                      No differences against {comparisonBase?.label ?? "the baseline"}.
+                    </div>
+                  )}
                   <MonacoDiffViewer
                     position={filePosition}
-                    key={path}
+                    key={`${path}:${diffQuery.data.base?.commit ?? "snapshot"}`}
                     before={diffQuery.data.before}
                     after={diffQuery.data.after}
                     path={path}

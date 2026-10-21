@@ -1,13 +1,5 @@
-// TanStack Query hook for the filesystem file-diff endpoint:
-// `GET /v1/sessions/{sessionId}/resources/environments/{environmentId}/diff/{path}`.
-//
-// Returns `before` (content at first observed modification) and `after`
-// (current content) as strings — either may be null:
-//   before=null → new file (no pre-session snapshot available)
-//   after=null  → deleted file
-//
-// Requested diffs can start while the changed-files list is loading. Known
-// unchanged files and unavailable workspaces keep the query disabled.
+// Workspace comparisons use an explicit Git revision or the legacy change baseline.
+// A null before/after means the file is absent on that side.
 
 import { useQuery } from "@tanstack/react-query";
 import { authenticatedFetch } from "@/lib/identity";
@@ -24,8 +16,9 @@ const DEFAULT_ENVIRONMENT_ID = "default";
 export interface FileDiffResponse {
   object: "session.environment.filesystem.file_diff";
   path: string;
-  /** File content at the time of the first modification, or null for new files. */
+  /** Content at the selected revision or change baseline; null for additions. */
   before: string | null;
+  base?: { ref: string; commit: string };
   /** Current file content, or null for deleted files. */
   after: string | null;
 }
@@ -39,12 +32,17 @@ class FileDiffError extends Error {
   }
 }
 
-async function fetchFileDiff(conversationId: string, path: string): Promise<FileDiffResponse> {
+async function fetchFileDiff(
+  conversationId: string,
+  path: string,
+  base?: string,
+): Promise<FileDiffResponse> {
   // Encode each path segment individually so slashes remain structural.
   const encodedPath = path.split("/").map(encodeURIComponent).join("/");
   const url =
     `/v1/sessions/${encodeURIComponent(conversationId)}` +
-    `/resources/environments/${DEFAULT_ENVIRONMENT_ID}/diff/${encodedPath}`;
+    `/resources/environments/${DEFAULT_ENVIRONMENT_ID}/diff/${encodedPath}` +
+    (base !== undefined ? `?${new URLSearchParams({ base })}` : "");
   const res = await authenticatedFetch(url);
   if (!res.ok) {
     // Surface the server's reason (e.g. "git status timed out after 5.0s")
@@ -63,17 +61,18 @@ async function fetchFileDiff(conversationId: string, path: string): Promise<File
 }
 
 /**
- * Fetch before/after diff content for a changed workspace file.
+ * Fetch a workspace file against a Git revision or its change baseline.
  *
  * Disabled (no request made) when:
  * - `conversationId` or `path` is missing, or the session id is temporary
  * - neither the runner nor host can serve the workspace
- * - the file is known unchanged (or discovery is pending without a request)
+ * - a legacy comparison has no known change or explicit discovery request
+ * - the caller disables the query while resolving comparison intent
  */
 export function useFileDiff(
   conversationId: string | undefined,
   path: string | null,
-  options: { requested?: boolean } = {},
+  options: { requested?: boolean; base?: string; enabled?: boolean } = {},
 ) {
   const serveable = useWorkspaceServeable(conversationId);
   const changedFiles = useWorkspaceChangedFiles(conversationId);
@@ -84,19 +83,24 @@ export function useFileDiff(
     options.requested && changedFiles.data === undefined && !changedFiles.isError;
 
   return useQuery({
-    queryKey: ["file-diff", conversationId, path],
-    queryFn: () => fetchFileDiff(conversationId!, path!),
+    queryKey:
+      options.base === undefined
+        ? ["file-diff", conversationId, path]
+        : ["file-diff", conversationId, path, options.base],
+    queryFn: () => fetchFileDiff(conversationId!, path!, options.base),
     enabled:
+      options.enabled !== false &&
       !!conversationId &&
       !isTempConvId(conversationId) &&
       !!path &&
       serveable !== false &&
       environment.data?.available !== false &&
-      (isInChangedFiles || !!requestedBeforeDiscovery),
+      (options.base !== undefined || isInChangedFiles || !!requestedBeforeDiscovery),
     // An old diff link may point to a now-unchanged file; don't retry its expected 404.
-    ...(requestedBeforeDiscovery && {
+    ...((requestedBeforeDiscovery || options.base !== undefined) && {
       retry: (failureCount: number, error: Error) =>
-        !(error instanceof FileDiffError && error.status === 404) && failureCount < 3,
+        !(error instanceof FileDiffError && [400, 404, 413].includes(error.status)) &&
+        failureCount < 3,
     }),
     staleTime: 5_000,
   });

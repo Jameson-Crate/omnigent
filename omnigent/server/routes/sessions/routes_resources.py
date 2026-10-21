@@ -2714,6 +2714,28 @@ def register_resources_routes(
         )
 
     @file_read_router.get(
+        "/sessions/{session_id}/resources/environments/{environment_id}/diff-bases",
+        include_in_schema=False,
+        response_model=None,
+    )
+    async def read_environment_diff_bases(
+        request: Request,
+        session_id: str,
+        environment_id: str,
+    ) -> Any:
+        conv = await _authorize_browse_read(session_id, request)
+        return await _fs_get_with_host_fallback(
+            session_id,
+            conv,
+            op="diff_bases",
+            host_params={},
+            runner_path=(
+                f"/v1/sessions/{session_id}/resources/environments/"
+                f"{_runner_environment_segment(environment_id)}/diff-bases"
+            ),
+        )
+
+    @file_read_router.get(
         "/sessions/{session_id}/resources/environments/{environment_id}/diff/{relative_path:path}",
         # Internal (UI diff view) — hidden from the public API reference.
         include_in_schema=False,
@@ -2724,18 +2746,19 @@ def register_resources_routes(
         session_id: str,
         environment_id: str,
         relative_path: str,
+        base: str | None = None,
     ) -> Any:
         """
-        Return before/after diff content for a changed file.
+        Return before/after content against a Git revision or change baseline.
 
-        Proxies to the runner's diff endpoint and returns before/after
-        content strings so the UI can render a diff view.  Returns 404 when
-        the file has not been modified this session.
+        Explicit revisions compare any workspace file with the exact commit.
+        Omitting base preserves the session change-registry comparison.
 
         :param request: The incoming FastAPI request (for auth).
         :param session_id: Session/conversation identifier.
         :param environment_id: Environment resource id.
         :param relative_path: Path relative to environment root.
+        :param base: Optional locally available Git revision.
         :returns: JSON with ``before`` and ``after`` content strings.
         """
         encoded = _runner_path_segment(relative_path, absolute=relative_path.startswith("/"))
@@ -2748,7 +2771,8 @@ def register_resources_routes(
             session_id,
             conv,
             op="diff",
-            host_params={"path": relative_path},
+            host_params={"path": relative_path, **({"base": base} if base is not None else {})},
+            runner_params={"base": base} if base is not None else None,
             runner_path=path,
         )
 

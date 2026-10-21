@@ -3711,7 +3711,13 @@ class HostProcess:
         if op == "changes":
             return r.changes(session_id)
         if op == "diff":
-            return r.diff(session_id, str(params.get("path", "")))
+            return r.diff(
+                session_id,
+                str(params.get("path", "")),
+                base=cast("str | None", params.get("base")),
+            )
+        if op == "diff_bases":
+            return r.diff_bases()
         if op == "search":
             return r.search(
                 str(params.get("q", "")),

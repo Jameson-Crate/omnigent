@@ -139,6 +139,12 @@ vi.mock("@/hooks/useFileContent", () => ({
   useFileContent: vi.fn(() => ({ data: { content: "", path: "file1.py" } })),
 }));
 
+vi.mock("@/hooks/useDiffBases", () => ({
+  useDiffBases: vi.fn(() => ({
+    data: { available: false, default: null, branches: [], commits: [] },
+  })),
+}));
+
 vi.mock("@/hooks/useFileDiff", () => ({
   // Diff payload present (the diff view only renders once data has loaded).
   useFileDiff: vi.fn(() => ({ data: { before: "old", after: "new" } })),
@@ -187,6 +193,7 @@ import { useComments } from "@/hooks/useComments";
 import { useIsMobileViewport } from "@/hooks/useIsMobileViewport";
 import { useOptionalCommentSender } from "@/hooks/CommentSenderContext";
 import { useFileDiff } from "@/hooks/useFileDiff";
+import { useDiffBases } from "@/hooks/useDiffBases";
 import { prepareDiffEditor } from "./MonacoDiffViewer";
 import { MAX_RICH_MARKDOWN_BYTES } from "./codeViewerHelpers";
 import { useFileContent } from "@/hooks/useFileContent";
@@ -2308,4 +2315,59 @@ it("keeps grid file viewers independent of shared URL parameters and copies a se
   expect(copied.pathname).toBe("/c/conv_1");
   expect(copied.searchParams.get("file")).toBe("file1.py");
   expect(copied.searchParams.has("comment")).toBe(false);
+});
+
+describe("Git comparison baselines", () => {
+  const choices = {
+    available: true,
+    default: { ref: "refs/heads/main", label: "main", commit: "a".repeat(40) },
+    branches: [{ ref: "refs/heads/main", label: "main", commit: "a".repeat(40) }],
+    commits: [{ commit: "b".repeat(40), subject: "Earlier version" }],
+  };
+
+  it("opens a clean file against main and can select HEAD", async () => {
+    useCommentsMock.mockReturnValue(makeCommentsQuery([]));
+    await vi.mocked(useDiffBases).withImplementation(
+      () => ({ data: choices }) as ReturnType<typeof useDiffBases>,
+      async () => {
+        renderViewer({ open: true, path: "unchanged.py" });
+        fireEvent.click(screen.getByRole("button", { name: "Show diff" }));
+        expect(await screen.findByTestId("diff-viewer")).toBeInTheDocument();
+        expect(useFileDiff).toHaveBeenLastCalledWith("conv_1", "unchanged.py", {
+          requested: true,
+          base: "refs/heads/main",
+          enabled: true,
+        });
+        fireEvent.click(screen.getByRole("button", { name: "Compare against: main" }));
+        fireEvent.click(await screen.findByRole("option", { name: "HEAD" }));
+        await waitFor(() =>
+          expect(useFileDiff).toHaveBeenLastCalledWith("conv_1", "unchanged.py", {
+            requested: true,
+            base: "HEAD",
+            enabled: true,
+          }),
+        );
+      },
+    );
+  });
+
+  it("uses the commit from a shared URL instead of the default", async () => {
+    useCommentsMock.mockReturnValue(makeCommentsQuery([]));
+    await vi.mocked(useDiffBases).withImplementation(
+      () => ({ data: choices }) as ReturnType<typeof useDiffBases>,
+      async () => {
+        renderViewer({
+          open: true,
+          path: "unchanged.py",
+          initialSearch: `diff=1&diffBase=${"b".repeat(40)}`,
+        });
+        expect(await screen.findByTestId("diff-viewer")).toBeInTheDocument();
+        expect(useFileDiff).toHaveBeenLastCalledWith("conv_1", "unchanged.py", {
+          requested: true,
+          base: "b".repeat(40),
+          enabled: true,
+        });
+      },
+    );
+  });
 });

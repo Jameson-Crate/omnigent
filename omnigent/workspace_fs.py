@@ -36,7 +36,9 @@ import base64
 import mimetypes
 import os
 import re
+import subprocess
 from collections import deque
+from collections.abc import Callable
 from pathlib import Path
 from typing import TypeAlias, cast
 
@@ -55,6 +57,8 @@ from omnigent.runner.environment_filesystem import (
 )
 from omnigent.runtime.filesystem_registry import (
     GitStatusUnavailable,
+    _anchored_git_env,
+    _git_timeout_seconds,
     create_filesystem_registry,
 )
 
@@ -509,14 +513,24 @@ class WorkspaceReader:
         ]
         return {"object": "list", "data": data, "has_more": False}
 
-    def diff(self, session_id: str, relative_path: str) -> _WorkspacePayload:
+    def diff(
+        self,
+        session_id: str,
+        relative_path: str,
+        *,
+        base: str | None = None,
+        read_current: Callable[[], bytes | None] | None = None,
+    ) -> _WorkspacePayload:
         """Return before/after content, mirroring the runner diff endpoint.
 
         :param session_id: Session id (git mode ignores it).
         :param relative_path: Path relative to the workspace root.
+        :param base: Exact Git revision to compare with disk. When omitted,
+            use the change registry's existing HEAD or snapshot baseline.
+        :param read_current: Optional sandbox-authorized, byte-bounded current-file read.
         :returns: A file-diff dict with ``before``/``after`` strings.
-        :raises WorkspaceReaderError: On invalid path, git failure, or a
-            path not in the changed-files registry (404).
+        :raises WorkspaceReaderError: On invalid path, revision, Git failure,
+            or a missing file. Legacy reads require a changed-file record.
         """
         try:
             relative_path = _validate_path(relative_path)
@@ -524,6 +538,9 @@ class WorkspaceReader:
             raise WorkspaceReaderError(400, "invalid_path", str(exc)) from exc
         if not relative_path:
             raise WorkspaceReaderError(400, "invalid_path", "Cannot diff the workspace root")
+
+        if base is not None:
+            return self._compare_revision(relative_path, base, read_current)
 
         try:
             record = self._registry.get_changed_file(session_id, relative_path)
@@ -554,6 +571,163 @@ class WorkspaceReader:
             "path": relative_path,
             "before": before,
             "after": after,
+        }
+
+    def _git(self, *arguments: str, allow_failure: bool = False) -> bytes:
+        """Run a bounded-time, repository-anchored Git read without lazy fetching."""
+        root = self._registry.git_root
+        if root is None:
+            raise WorkspaceReaderError(
+                400, "not_git_workspace", "This workspace is not a Git checkout"
+            )
+        try:
+            result = subprocess.run(
+                ["git", *arguments],
+                cwd=root,
+                env={**_anchored_git_env(), "GIT_NO_LAZY_FETCH": "1", "GIT_OPTIONAL_LOCKS": "0"},
+                capture_output=True,
+                timeout=_git_timeout_seconds(),
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise WorkspaceReaderError(500, "git_read_failed", str(exc)) from exc
+        if result.returncode and not allow_failure:
+            raise WorkspaceReaderError(
+                500, "git_read_failed", result.stderr.decode("utf-8", errors="replace").strip()
+            )
+        return b"" if result.returncode else result.stdout
+
+    def _resolve_revision(self, revision: str) -> str:
+        """Resolve a user revision to a commit before using it in object expressions."""
+        if not revision or "\x00" in revision or revision.startswith("-"):
+            raise WorkspaceReaderError(400, "invalid_revision", "Enter a commit, branch, or tag")
+        commit = (
+            self._git(
+                "rev-parse",
+                "--verify",
+                "--end-of-options",
+                f"{revision}^{{commit}}",
+                allow_failure=True,
+            )
+            .decode()
+            .strip()
+        )
+        if not commit:
+            raise WorkspaceReaderError(
+                400, "invalid_revision", f"Revision {revision!r} is not available locally"
+            )
+        return commit
+
+    def diff_bases(self) -> _WorkspacePayload:
+        """Return local comparison choices and a main/master-first default."""
+        if self._registry.git_root is None:
+            return {"available": False, "default": None, "branches": [], "commits": []}
+        raw = self._git(
+            "for-each-ref",
+            "--format=%(refname)%09%(objectname)",
+            "refs/heads/",
+            "refs/remotes/",
+        ).decode("utf-8", errors="replace")
+        branches = []
+        for line in raw.splitlines():
+            reference, commit = line.split("\t", 1)
+            if reference.endswith("/HEAD"):
+                continue
+            branches.append(
+                {
+                    "ref": reference,
+                    "label": reference.removeprefix("refs/heads/").removeprefix("refs/remotes/"),
+                    "commit": commit,
+                }
+            )
+        references = {branch["ref"]: branch for branch in branches}
+        default = next(
+            (
+                references[reference]
+                for reference in (
+                    "refs/heads/main",
+                    "refs/remotes/origin/main",
+                    "refs/heads/master",
+                    "refs/remotes/origin/master",
+                )
+                if reference in references
+            ),
+            None,
+        )
+        if default is None:
+            remote_head = (
+                self._git(
+                    "symbolic-ref", "--quiet", "refs/remotes/origin/HEAD", allow_failure=True
+                )
+                .decode()
+                .strip()
+            )
+            default = references.get(remote_head)
+        head = (
+            self._git("rev-parse", "--verify", "HEAD^{commit}", allow_failure=True)
+            .decode()
+            .strip()
+        )
+        if default is None and head:
+            default = {"ref": "HEAD", "label": "HEAD", "commit": head}
+        commits = []
+        if head or branches:
+            history = self._git("log", "--all", "-50", "--format=%H%x09%s", "--").decode(
+                "utf-8", errors="replace"
+            )
+            for line in history.splitlines():
+                commit, subject = line.split("\t", 1)
+                commits.append({"commit": commit, "subject": subject})
+        return {"available": True, "default": default, "branches": branches, "commits": commits}
+
+    def _compare_revision(
+        self,
+        relative_path: str,
+        base: str,
+        read_current: Callable[[], bytes | None] | None,
+    ) -> _WorkspacePayload:
+        """Compare one exact committed path with its saved workspace contents."""
+        resolved = self._resolve(relative_path)
+        commit = self._resolve_revision(base)
+        root = self._registry.git_root
+        assert root is not None
+        git_path = (self._root.relative_to(root) / relative_path).as_posix()
+        tree = self._git("ls-tree", "-z", commit, "--", f":(literal){git_path}")
+        before = None
+        if tree:
+            metadata = tree.split(b"\t", 1)[0].split()
+            if metadata[1] != b"blob":
+                raise WorkspaceReaderError(400, "invalid_path", "Only files can be compared")
+            blob = metadata[2].decode()
+            if int(self._git("cat-file", "-s", blob)) > _MAX_READ_BYTES:
+                raise WorkspaceReaderError(413, "file_too_large", "File is too large to compare")
+            before = self._git("cat-file", "blob", blob).decode("utf-8", errors="replace")
+        after = None
+        try:
+            if read_current is None:
+                with resolved.open("rb") as stream:
+                    raw = stream.read(_MAX_READ_BYTES + 1)
+            else:
+                raw = read_current()
+            if raw is not None:
+                if len(raw) > _MAX_READ_BYTES:
+                    raise WorkspaceReaderError(
+                        413, "file_too_large", "File is too large to compare"
+                    )
+                after = raw.decode("utf-8", errors="replace")
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            raise WorkspaceReaderError(400, "file_read_failed", str(exc)) from exc
+        if before is None and after is None:
+            raise WorkspaceReaderError(
+                404, "not_found", f"File {relative_path!r} does not exist on either side"
+            )
+        return {
+            "object": "session.environment.filesystem.file_diff",
+            "path": relative_path,
+            "before": before,
+            "after": after,
+            "base": {"ref": base, "commit": commit},
         }
 
     # ── Pull request panel (read-only) ────────────────────────────

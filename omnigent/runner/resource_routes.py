@@ -1262,6 +1262,63 @@ def register_resource_routes(
             content={"object": "list", "data": data, "has_more": False},
         )
 
+    async def _read_git_comparison(
+        session_id: str,
+        environment_id: str,
+        relative_path: str | None = None,
+        base: str | None = None,
+    ) -> JSONResponse:
+        from omnigent.entities.environment_filesystem import FilesystemPathNotFound
+        from omnigent.runner.environment_filesystem import (
+            _MAX_READ_BYTES,
+            CallerProcessFilesystem,
+            _validate_path,
+        )
+        from omnigent.workspace_fs import WorkspaceReader, WorkspaceReaderError
+
+        agent_spec = await _require_os_env(session_id)
+        await _ensure_session_registered(session_id)
+        env = resource_registry.resolve_environment(session_id, environment_id, agent_spec)
+        fs = CallerProcessFilesystem(env)
+        current_file = None
+        if relative_path is not None:
+            relative_path = _validate_path(relative_path)
+            resolved = fs._resolve(relative_path)
+            try:
+                # Use the existing sandbox/inode check before exposing either side.
+                current_file, _, _ = await fs.open_download(relative_path)
+            except FilesystemPathNotFound:
+                if resolved.exists():
+                    raise
+
+        def read() -> dict[str, object]:
+            reader = WorkspaceReader(fs._resolve(""))
+            if relative_path is None:
+                return reader.diff_bases()
+            return reader.diff(
+                session_id,
+                relative_path,
+                base=base,
+                read_current=lambda: (
+                    current_file.read(_MAX_READ_BYTES + 1) if current_file else None
+                ),
+            )
+
+        try:
+            return JSONResponse(await asyncio.to_thread(read))
+        except WorkspaceReaderError as exc:
+            return JSONResponse(
+                status_code=exc.status,
+                content={"error": {"code": exc.code, "message": exc.message}},
+            )
+        finally:
+            if current_file is not None:
+                current_file.close()
+
+    @app.get("/v1/sessions/{session_id}/resources/environments/{environment_id}/diff-bases")
+    async def read_environment_diff_bases(session_id: str, environment_id: str) -> JSONResponse:
+        return await _read_git_comparison(session_id, environment_id)
+
     @app.get(
         "/v1/sessions/{session_id}/resources/environments"
         "/{environment_id}/diff/{relative_path:path}"
@@ -1270,7 +1327,10 @@ def register_resource_routes(
         session_id: str,
         environment_id: str,
         relative_path: str,
+        base: str | None = None,
     ) -> JSONResponse:
+        if base is not None:
+            return await _read_git_comparison(session_id, environment_id, relative_path, base)
         agent_spec = await _require_os_env(session_id)
         await _ensure_session_registered(session_id)
         session_registry = await _resolve_session_fs_registry(session_id)

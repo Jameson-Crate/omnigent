@@ -1007,6 +1007,12 @@ async def test_download_under_real_sandbox_refuses_masked_file(
             masked = await client.get(f"{base}/.env", params={"download": "true"})
             assert masked.status_code == 404
             assert b"super-secret-value-12345" not in masked.content
+            comparison = await client.get(
+                f"/v1/sessions/conv_test/resources/environments/{DEFAULT_ENVIRONMENT_ID}/diff/.env",
+                params={"base": "HEAD"},
+            )
+            assert comparison.status_code == 404
+            assert b"super-secret-value-12345" not in comparison.content
 
             plain = await client.get(f"{base}/plain.bin", params={"download": "true"})
             assert plain.status_code == 200
@@ -1552,6 +1558,8 @@ async def test_filesystem_changes_no_events_returns_empty(
         ("DELETE", "/filesystem/hello.txt", None),
         ("POST", "/shell", {"command": "echo hi"}),
         ("GET", "/diff/hello.txt", None),
+        ("GET", "/diff/hello.txt?base=HEAD", None),
+        ("GET", "/diff-bases", None),
         ("GET", "/search?q=hello", None),
     ],
     ids=[
@@ -1563,6 +1571,8 @@ async def test_filesystem_changes_no_events_returns_empty(
         "delete_file",
         "shell_exec",
         "diff_file",
+        "diff_revision",
+        "diff_bases",
         "search_files",
     ],
 )
@@ -1629,6 +1639,32 @@ async def test_filesystem_endpoints_return_404_when_spec_has_no_os_env(
 
 
 # ── diff endpoint ────────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_git_comparison_routes_read_clean_files(
+    app: FastAPI,
+    workspace: Path,
+) -> None:
+    for arguments in (
+        ["init", "-b", "main"],
+        ["add", "."],
+        ["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "initial"],
+    ):
+        subprocess.run(["git", *arguments], cwd=workspace, check=True, capture_output=True)
+    transport = httpx.ASGITransport(app=app)
+    base = f"/v1/sessions/conv_test/resources/environments/{DEFAULT_ENVIRONMENT_ID}"
+    async with httpx.AsyncClient(transport=transport, base_url="http://runner") as client:
+        choices = await client.get(f"{base}/diff-bases")
+        assert choices.status_code == 200
+        assert choices.json()["default"]["label"] == "main"
+        result = await client.get(f"{base}/diff/hello.txt", params={"base": "main"})
+        assert result.status_code == 200, result.text
+        assert result.json()["before"] == result.json()["after"] == "hello world"
+        assert result.json()["base"]["commit"] == choices.json()["default"]["commit"]
+        invalid = await client.get(f"{base}/diff/hello.txt", params={"base": "missing"})
+        assert invalid.status_code == 400
+        assert invalid.json()["error"]["code"] == "invalid_revision"
 
 
 @pytest.mark.asyncio
