@@ -84,38 +84,6 @@ async def client(app: FastAPI) -> AsyncIterator[httpx.AsyncClient]:
         yield c
 
 
-async def test_language_server_resource_lifecycle(
-    client: httpx.AsyncClient,
-    registry: SessionResourceRegistry,
-    workspace: Path,
-) -> None:
-    """The resource route resolves the owning environment and session cleanup stops it."""
-    (workspace / "main.rs").write_text("fn main() {}")
-    endpoint = "/v1/sessions/conv_test/resources/environments/default/language-server"
-    body = {
-        "action": "attach",
-        "root": str(workspace.resolve()),
-        "token": "editor-1",
-        "path": "main.rs",
-        "text": "fn main() {}",
-        "command": ["missing-lsp-fixture-binary"],
-    }
-    response = await client.post(endpoint, json=body)
-    assert response.status_code == 200, response.text
-    assert response.json()["status"] == "starting"
-    service = next(iter(registry.language_services.services.values()))
-    await service.start_task
-    response = await client.post(endpoint, json={**body, "action": "poll"})
-    assert response.json()["status"] == "failed"
-    assert "missing-lsp-fixture-binary" in response.json()["message"]
-    malformed = await client.post(endpoint, json={"action": "shell"})
-    assert malformed.status_code == 422
-    stale = await client.post(endpoint, json={**body, "root": str(workspace / "old-worktree")})
-    assert stale.status_code == 409
-    await registry.cleanup_session("conv_test")
-    assert not registry.language_services.services
-
-
 @pytest.mark.asyncio
 async def test_list_environment_root(
     client: httpx.AsyncClient,

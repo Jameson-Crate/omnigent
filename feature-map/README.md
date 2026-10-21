@@ -113,9 +113,6 @@ user-visible behavior. It then uses exactly these four H2 sections in order:
 
 ## Features
 
-- [Rust language tools](./rust-language-tools.md) covers workspace-host LSP
-  startup, diagnostics, navigation, outline, formatting and verification gaps.
-
 - [Workspace content search](./workspace-content-search.md) covers runner-backed
   text search, result navigation and its release flag.
 

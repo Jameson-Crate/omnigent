@@ -1010,29 +1010,6 @@ def register_resource_routes(
             )
         return spec
 
-    @app.post("/v1/sessions/{session_id}/resources/environments/default/language-server")
-    async def operate_language_server(session_id: str, request: Request) -> JSONResponse:
-        from pydantic import ValidationError
-
-        from omnigent.runner.language_server import LanguageServerError
-        from omnigent.runner.language_service import LanguageOperation
-
-        try:
-            operation = LanguageOperation.model_validate(await request.json())
-        except (ValidationError, ValueError) as exc:
-            return JSONResponse(status_code=422, content={"error": {"message": str(exc)}})
-        spec = await _require_os_env(session_id)
-        environment = resource_registry.resolve_environment(
-            session_id, DEFAULT_ENVIRONMENT_ID, spec
-        )
-        try:
-            result = await resource_registry.language_services.operate(
-                session_id, environment, operation
-            )
-            return JSONResponse(content=result)
-        except (LanguageServerError, OSError, TimeoutError) as exc:
-            return JSONResponse(status_code=409, content={"error": {"message": str(exc)}})
-
     @app.get("/v1/sessions/{session_id}/resources/environments/{environment_id}/filesystem")
     async def list_environment_root(
         session_id: str,

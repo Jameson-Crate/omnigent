@@ -1674,7 +1674,6 @@ def create_app(
         try:
             yield
         finally:
-            await app.state.session_resource_registry.language_services.close()
             await _stop_pm()
 
     app.router.lifespan_context = _lifespan
