@@ -3094,6 +3094,27 @@ def register_resources_routes(
             publish_invalidation=False,
         )
 
+    @router.post(
+        "/sessions/{session_id}/resources/environments/default/language-server",
+        response_model=None,
+        dependencies=[Depends(require_json_content_type)],
+    )
+    async def operate_language_server(session_id: str, request: Request) -> Any:
+        """Owner-authorized editor operations on the workspace's owning runner.
+
+        Language servers can execute project build scripts. The owner gate is
+        the same as shell execution, including for attaching and polling.
+        """
+        return await _proxy_fs_response(
+            session_id,
+            "POST",
+            f"/v1/sessions/{session_id}/resources/environments/default/language-server",
+            await request.json(),
+            request=request,
+            required_level=LEVEL_OWNER,
+            publish_invalidation=False,
+        )
+
     # ── GitHub integration (read-only) ───────────────────────────
     # Registered BEFORE the generic ``/{resource_id}`` lookup so
     # ``/resources/github`` is not captured as a resource id. The diff route

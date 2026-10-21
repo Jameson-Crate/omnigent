@@ -62,6 +62,7 @@ from omnigent.server.routes.sessions import create_sessions_router
 # The server route is mounted under /v1 and proxies to the runner at the
 # same path, so the client URL and the recorded runner path are identical.
 _SHELL_PATH = "/v1/sessions/conv_share/resources/environments/default/shell"
+_LANGUAGE_PATH = "/v1/sessions/conv_share/resources/environments/default/language-server"
 
 
 class _StubConversationStore:
@@ -337,13 +338,15 @@ async def client(app: FastAPI) -> AsyncIterator[httpx.AsyncClient]:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("execution_path", [_SHELL_PATH, _LANGUAGE_PATH])
 async def test_shell_rejects_read_only_collaborator_before_runner(
     client: httpx.AsyncClient,
     runner_client: _RecordingRunnerClient,
+    execution_path: str,
 ) -> None:
     """A read-only collaborator cannot run shell, and the runner is never hit."""
     resp = await client.post(
-        _SHELL_PATH,
+        execution_path,
         json={"command": "cat ~/.ssh/id_rsa"},
         headers={"X-Forwarded-Email": "viewer@example.com"},
     )
@@ -353,9 +356,11 @@ async def test_shell_rejects_read_only_collaborator_before_runner(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("execution_path", [_SHELL_PATH, _LANGUAGE_PATH])
 async def test_shell_rejects_unauthenticated_before_runner(
     client: httpx.AsyncClient,
     runner_client: _RecordingRunnerClient,
+    execution_path: str,
 ) -> None:
     """Unauthenticated shell exec is rejected.
 
@@ -363,20 +368,22 @@ async def test_shell_rejects_unauthenticated_before_runner(
     with 401 — the request never resolves to a user,
     let alone reaches the permission check or the runner.
     """
-    resp = await client.post(_SHELL_PATH, json={"command": "echo hi"})
+    resp = await client.post(execution_path, json={"command": "echo hi"})
     assert resp.status_code == 401, resp.text
     assert runner_client.posts == []
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("execution_path", [_SHELL_PATH, _LANGUAGE_PATH])
 async def test_shell_rejects_edit_collaborator_before_runner(
     client: httpx.AsyncClient,
     runner_client: _RecordingRunnerClient,
+    execution_path: str,
 ) -> None:
     """Edit is not enough: the shell has no workspace-relative form, so the
     bar is the same one an absolute filesystem path carries."""
     resp = await client.post(
-        _SHELL_PATH,
+        execution_path,
         json={"command": "cat ~/.ssh/id_rsa"},
         headers={"X-Forwarded-Email": "owner@example.com"},
     )
@@ -385,6 +392,7 @@ async def test_shell_rejects_edit_collaborator_before_runner(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("execution_path", [_SHELL_PATH, _LANGUAGE_PATH])
 @pytest.mark.parametrize(
     "caller",
     ["real-owner@example.com", "admin@example.com"],
@@ -394,17 +402,18 @@ async def test_shell_allows_owner_and_proxies(
     client: httpx.AsyncClient,
     runner_client: _RecordingRunnerClient,
     caller: str,
+    execution_path: str,
 ) -> None:
     """The owner (or an admin) is allowed through and the command is proxied."""
     resp = await client.post(
-        _SHELL_PATH,
+        execution_path,
         json={"command": "echo hi"},
         headers={"X-Forwarded-Email": caller},
     )
     assert resp.status_code == 200, resp.text
     assert resp.json()["stdout"] == "ok\n"
     # The owner's command reached the runner verbatim.
-    assert runner_client.posts == [(_SHELL_PATH, {"command": "echo hi"})]
+    assert runner_client.posts == [(execution_path, {"command": "echo hi"})]
 
 
 _FS_BASE = "/v1/sessions/conv_share/resources/environments/default/filesystem"

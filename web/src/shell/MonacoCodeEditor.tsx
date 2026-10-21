@@ -44,6 +44,7 @@ import {
 import type { monaco } from "./monacoSetup";
 import { useMonacoCommentLayer, type CodeEditorInstance } from "./useMonacoCommentLayer";
 import { attachEditorScrollRestore } from "./useScrollRestore";
+import { LanguageTools } from "./LanguageTools";
 import "./monacoCodeEditor.css";
 
 type EditorOptions = EditorProps["options"];
@@ -512,6 +513,16 @@ function MonacoCodeEditorInner({
 
   return (
     <div className="flex h-full flex-col">
+      {lang === "rust" && !truncated && (
+        <LanguageTools
+          sessionId={conversationId}
+          path={path}
+          editorRef={editorInstanceRef}
+          mounted={mounted}
+          canEdit={canEdit}
+          savedText={content}
+        />
+      )}
       {largeMarkdown && (
         <div className="shrink-0 border-b border-border bg-muted/50 px-4 py-2 text-sm text-muted-foreground">
           Large Markdown file opened as source to keep the viewer responsive.
