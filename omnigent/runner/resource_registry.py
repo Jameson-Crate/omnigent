@@ -475,9 +475,6 @@ class SessionResourceRegistry:
         self._runner_workspace = runner_workspace
         self._per_session_workspace = per_session_workspace
         self._primary_envs: dict[str, OSEnvironment] = {}
-        from omnigent.runner.language_service import SessionLanguageServices
-
-        self.language_services = SessionLanguageServices()
         self._primary_env_specs: dict[str, OSEnvSpec | None] = {}
         self._codex_skills_dirs: dict[str, tempfile.TemporaryDirectory[str]] = {}
         self._terminal_roles: dict[tuple[str, str], str] = {}
@@ -2055,7 +2052,6 @@ class SessionResourceRegistry:
 
         :param session_id: Session/conversation identifier.
         """
-        await self.language_services.cleanup_session(session_id)
         self._take_session_status_memo(session_id)
         with self._lock:
             self._session_activity_epoch.pop(session_id, None)
