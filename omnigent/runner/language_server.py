@@ -61,7 +61,7 @@ class LanguageServer:
         self._close_lock = asyncio.Lock()
         self._dispose_lock = asyncio.Lock()
         self._failure_cleanup: asyncio.Task[None] | None = None
-        self._progress: set[str] = set()
+        self._progress: dict[str, str] = {}
 
     async def start(self) -> None:
         """Initialize asynchronously; preserve startup causes and sandbox policy."""
@@ -138,7 +138,11 @@ class LanguageServer:
             )
             await self.notify("workspace/didChangeConfiguration", {"settings": configuration})
             self.status = "indexing" if self._progress else "ready"
-            self.message = "Language server ready"
+            self.message = (
+                next(reversed(self._progress.values()))
+                if self._progress
+                else "Language server ready"
+            )
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001 — startup failures become actionable status
@@ -251,12 +255,20 @@ class LanguageServer:
             value = params.get("value", {})
             token = str(params.get("token"))
             if value.get("kind") == "begin":
-                self._progress.add(token)
+                self._progress[token] = (
+                    value.get("message") or value.get("title") or "Indexing workspace…"
+                )
             elif value.get("kind") == "end":
-                self._progress.discard(token)
+                self._progress.pop(token, None)
+            elif token in self._progress and value.get("message"):
+                self._progress[token] = value["message"]
             if self.status != "starting":
                 self.status = "indexing" if self._progress else "ready"
-            self.message = value.get("message") or value.get("title") or "Language server ready"
+            self.message = (
+                next(reversed(self._progress.values()))
+                if self._progress
+                else "Language server ready"
+            )
         elif method == "experimental/serverStatus":
             self.status = (
                 "degraded"

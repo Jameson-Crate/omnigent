@@ -55,7 +55,10 @@ the current editor; it is not persisted across backends.
 
 Buttons reflect negotiated capabilities. Unsupported operations report the
 server's missing capability instead of claiming success. Indexing is shown only
-when the server reports progress. Starting, ready, degraded, failed and stopped
+when the server reports progress. Large workspaces may spend several minutes
+loading crates, expanding macros and building analysis caches. Navigation and
+outline can return no results during this period; the editor reports this and
+you can retry when ready. Starting, ready, degraded, failed and stopped
 states include actionable messages. Missing binaries, expired attachments, changed
 roots and disconnected hosts require correcting the cause and restarting LSP.
 

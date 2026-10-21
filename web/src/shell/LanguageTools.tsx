@@ -92,6 +92,7 @@ function WorkspaceLanguageTools({
   const [enabled, setEnabled] = useState(false);
   const [snapshot, setSnapshot] = useState<LanguageSnapshot | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const [symbols, setSymbols] = useState<LanguageSymbol[]>([]);
   const [references, setReferences] = useState<LanguageLocation[]>([]);
   const clientRef = useRef<LanguageClient | null>(null);
@@ -210,6 +211,7 @@ function WorkspaceLanguageTools({
       monaco.editor.setModelMarkers(model, client.token, []);
       setSymbols([]);
       setReferences([]);
+      setNotice(null);
       setSnapshot((current) => (current ? { ...current, diagnostics: [] } : current));
       clearTimeout(syncTimer);
       syncTimer = setTimeout(() => {
@@ -231,16 +233,11 @@ function WorkspaceLanguageTools({
 
   const capabilities = snapshot?.capabilities;
   const status = snapshot?.status;
+  const hoverEnabled =
+    !!capabilities?.hoverProvider && !!status && ["ready", "indexing", "degraded"].includes(status);
   useEffect(() => {
     const model = editorRef.current?.getModel();
-    if (
-      !enabled ||
-      !model ||
-      !capabilities?.hoverProvider ||
-      !status ||
-      !["ready", "indexing", "degraded"].includes(status)
-    )
-      return;
+    if (!enabled || !model || !hoverEnabled) return;
     const hover = monaco.languages.registerHoverProvider(model.getLanguageId(), {
       provideHover: async (target, position, token) => {
         if (target !== model || token.isCancellationRequested) return null;
@@ -277,11 +274,12 @@ function WorkspaceLanguageTools({
       },
     });
     return () => hover.dispose();
-  }, [enabled, capabilities, status, request, editorRef]);
+  }, [enabled, hoverEnabled, request, editorRef]);
 
   const perform = useCallback(
     async (method: string) => {
       setError(null);
+      setNotice(null);
       const editor = editorRef.current;
       const position = editor?.getPosition();
       if (!editor || !position) return;
@@ -293,6 +291,16 @@ function WorkspaceLanguageTools({
           { line: position.lineNumber - 1, character: position.column - 1 },
           { tab_size: options?.tabSize ?? 4, insert_spaces: options?.insertSpaces ?? true },
         );
+        if (
+          method !== "textDocument/formatting" &&
+          (result == null || (Array.isArray(result) && result.length === 0))
+        ) {
+          setNotice(
+            status === "indexing"
+              ? "No results yet. Workspace analysis is still running; try again when ready."
+              : "No results at this location.",
+          );
+        }
         if (method === "textDocument/definition") {
           const targets = locations(result);
           if (targets.length === 1) navigate(targets[0]);
@@ -319,7 +327,7 @@ function WorkspaceLanguageTools({
         setError(String(failure));
       }
     },
-    [request, navigate, canEdit, editorRef],
+    [request, navigate, canEdit, editorRef, status],
   );
 
   useEffect(() => {
@@ -362,6 +370,7 @@ function WorkspaceLanguageTools({
             setSymbols([]);
             setReferences([]);
             setError(null);
+            setNotice(null);
           }}
         >
           {enabled ? "Stop language server" : "Start Rust language server"}
@@ -396,6 +405,7 @@ function WorkspaceLanguageTools({
         </p>
       )}
       {snapshot?.message && <p>{snapshot.message}</p>}
+      {notice && <p role="status">{notice}</p>}
       {error && (
         <p role="alert" className="text-destructive">
           {error}

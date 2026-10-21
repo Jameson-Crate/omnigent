@@ -14,9 +14,30 @@ import pytest
 
 from omnigent.inner.datamodel import OSEnvSandboxSpec, OSEnvSpec
 from omnigent.inner.os_env import CallerProcessOSEnvironment, create_os_environment
-from omnigent.runner.language_server import LanguageServerError
+from omnigent.runner.language_server import LanguageServer, LanguageServerError
 from omnigent.runner.language_service import LanguageOperation, SessionLanguageServices
 from tests._helpers.polling import poll_until_async
+
+
+def test_progress_reports_remaining_phase(environment: CallerProcessOSEnvironment) -> None:
+    server = LanguageServer(environment, ["rust-analyzer"], {}, lambda *_: None)
+    server.status = "ready"
+    server._notification(
+        "$/progress", {"token": "load", "value": {"kind": "begin", "title": "Loading crates"}}
+    )
+    server._notification(
+        "$/progress", {"token": "cache", "value": {"kind": "begin", "title": "Building caches"}}
+    )
+    server._notification("$/progress", {"token": "load", "value": {"kind": "end"}})
+    assert server.status == "indexing"
+    assert server.message == "Building caches"
+    server._notification(
+        "$/progress", {"token": "cache", "value": {"kind": "report", "message": "10/20 caches"}}
+    )
+    assert server.message == "10/20 caches"
+    server._notification("$/progress", {"token": "cache", "value": {"kind": "end"}})
+    assert server.status == "ready"
+    assert server.message == "Language server ready"
 
 
 @pytest.fixture

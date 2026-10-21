@@ -42,7 +42,7 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
-it("clears markers, outline, locations and hover after a successful poll reports server failure", async () => {
+it("keeps hover across fresh status polls and clears results after server failure", async () => {
   vi.useFakeTimers();
   localStorage.clear();
   mocks.hover.mockReturnValue({ dispose: mocks.disposeHover });
@@ -69,6 +69,8 @@ it("clears markers, outline, locations and hover after a successful poll reports
     ],
   };
   let failed = false;
+  let indexing = true;
+  let empty = true;
   vi.mocked(authenticatedFetch).mockImplementation(async (_url, options) => {
     const operation = JSON.parse(String(options?.body));
     const result =
@@ -77,7 +79,12 @@ it("clears markers, outline, locations and hover after a successful poll reports
         : [{ uri: "file:///worktree/main.rs", range }];
     return {
       ok: true,
-      json: async () => ({ ...snapshot, status: failed ? "failed" : "ready", result }),
+      json: async () => ({
+        ...snapshot,
+        capabilities: { ...snapshot.capabilities },
+        status: failed ? "failed" : indexing ? "indexing" : "ready",
+        result: empty ? null : result,
+      }),
     } as Response;
   });
   const model = {
@@ -106,11 +113,23 @@ it("clears markers, outline, locations and hover after a successful poll reports
   await act(async () => {
     fireEvent.click(screen.getByText("Start Rust language server"));
   });
-  expect(screen.getByRole("status").textContent).toContain("ready");
+  expect(screen.getByRole("status").textContent).toContain("indexing");
+  await act(async () => {
+    fireEvent.click(screen.getByText("Outline"));
+  });
+  expect(screen.getByText(/Workspace analysis is still running/)).toBeTruthy();
+  indexing = false;
+  empty = false;
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(2000);
+  });
+  expect(mocks.hover).toHaveBeenCalledTimes(1);
+  expect(mocks.disposeHover).not.toHaveBeenCalled();
   expect(mocks.markers.mock.lastCall?.[2]).toHaveLength(1);
   await act(async () => {
     fireEvent.click(screen.getByText("Definition"));
   });
+  expect(screen.queryByText(/Workspace analysis is still running/)).toBeNull();
   expect(mocks.openFile).toHaveBeenCalledWith("main.rs", { line: 1, column: 1 });
   await act(async () => {
     fireEvent.click(screen.getByText("Outline"));
